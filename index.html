@@ -55,8 +55,12 @@
         <div class="controls-bar">
           <span id="fileName" class="file-name"></span>
           <span class="hint">ドラッグ:移動 | スクロール:拡縮 | Shift+ドラッグ:回転</span>
+          <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none;">
+            <input type="checkbox" id="overwriteCheck" /> 上書き
+          </label>
           <button id="swapBtn" class="secondary" disabled>画像切替</button>
           <button id="saveBtn" disabled>保存</button>
+          <button id="saveAsBtn" class="secondary" disabled>名前を付けて保存</button>
           <input type="file" id="swapInput" accept="image/*" />
         </div>
       </div>

@@ -15,6 +15,7 @@ let nextId = 1;
 let selectedId: number | null = null;
 let imageLoaded = false;
 let currentFileName = "";
+let sourceFileHandle: FileSystemFileHandle | null = null;
 
 // DOM
 const dropZone = document.getElementById("dropZone")!;
@@ -25,6 +26,8 @@ const ctx = canvas.getContext("2d")!;
 const swapBtn = document.getElementById("swapBtn") as HTMLButtonElement;
 const swapInput = document.getElementById("swapInput") as HTMLInputElement;
 const saveBtn = document.getElementById("saveBtn") as HTMLButtonElement;
+const saveAsBtn = document.getElementById("saveAsBtn") as HTMLButtonElement;
+const overwriteCheck = document.getElementById("overwriteCheck") as HTMLInputElement;
 const searchInput = document.getElementById("searchInput") as HTMLInputElement;
 const emojiGrid = document.getElementById("emojiGrid") as HTMLDivElement;
 const placedList = document.getElementById("placedList") as HTMLDivElement;
@@ -231,24 +234,55 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // --- ファイル処理 ---
-dropZone.addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("click", async () => {
+  if ("showOpenFilePicker" in window) {
+    try {
+      const [handle] = await (window as any).showOpenFilePicker({
+        types: [{ description: "Images", accept: { "image/*": [".png", ".jpg", ".jpeg", ".webp", ".gif"] } }],
+      });
+      const file = await handle.getFile();
+      handleFile(file, false, handle); return;
+    } catch { return; /* cancelled */ }
+  }
+  fileInput.click();
+});
 dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
-dropZone.addEventListener("drop", (e) => { e.preventDefault(); dropZone.classList.remove("dragover"); const f = (e as DragEvent).dataTransfer?.files[0]; if (f) handleFile(f); });
+dropZone.addEventListener("drop", async (e) => {
+  e.preventDefault(); dropZone.classList.remove("dragover");
+  const items = (e as DragEvent).dataTransfer?.items;
+  if (items?.[0]) {
+    // File System Access APIでハンドル取得を試みる
+    const item = items[0];
+    if ("getAsFileSystemHandle" in item) {
+      try {
+        const handle = await (item as any).getAsFileSystemHandle() as FileSystemFileHandle;
+        if (handle.kind === "file") {
+          const file = await handle.getFile();
+          handleFile(file, false, handle); return;
+        }
+      } catch { /* fallback */ }
+    }
+    const f = item.getAsFile();
+    if (f) handleFile(f);
+  }
+});
 fileInput.addEventListener("change", () => { if (fileInput.files?.[0]) handleFile(fileInput.files[0]); });
 
 swapBtn.addEventListener("click", () => swapInput.click());
 swapInput.addEventListener("change", () => { if (swapInput.files?.[0]) handleFile(swapInput.files[0], true); swapInput.value = ""; });
 
-function handleFile(file: File, keepStamps = false) {
+function handleFile(file: File, keepStamps = false, handle?: FileSystemFileHandle) {
   currentFileName = file.name;
   fileNameEl.textContent = currentFileName;
+  if (handle) sourceFileHandle = handle;
+  else if (!keepStamps) sourceFileHandle = null;
   const reader = new FileReader();
   reader.onload = (ev) => {
     preview.src = ev.target!.result as string;
     preview.onload = () => {
       preview.style.display = "block"; dropZone.classList.add("hidden");
-      imageLoaded = true; swapBtn.disabled = false; saveBtn.disabled = false;
+      imageLoaded = true; swapBtn.disabled = false; saveBtn.disabled = false; saveAsBtn.disabled = false;
       statusEl.textContent = keepStamps ? "画像を切り替えました" : "";
     };
   };
@@ -322,22 +356,85 @@ function renderPlacedList() {
 }
 
 // --- 保存 ---
-saveBtn.addEventListener("click", () => {
-  const w = preview.naturalWidth, h = preview.naturalHeight;
-  const c = document.createElement("canvas"); c.width = w; c.height = h;
-  const cctx = c.getContext("2d")!;
-  cctx.drawImage(preview, 0, 0);
+function renderToBlob(): Promise<Blob> {
+  return new Promise((resolve) => {
+    const w = preview.naturalWidth, h = preview.naturalHeight;
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const cctx = c.getContext("2d")!;
+    cctx.drawImage(preview, 0, 0);
+    for (const stamp of stamps) {
+      cctx.save();
+      cctx.translate(stamp.x, stamp.y);
+      cctx.rotate(stamp.rotation);
+      cctx.drawImage(stamp.img, -stamp.scale / 2, -stamp.scale / 2, stamp.scale, stamp.scale);
+      cctx.restore();
+    }
+    c.toBlob((blob) => resolve(blob!), "image/png");
+  });
+}
 
-  for (const stamp of stamps) {
-    cctx.save();
-    cctx.translate(stamp.x, stamp.y);
-    cctx.rotate(stamp.rotation);
-    cctx.drawImage(stamp.img, -stamp.scale / 2, -stamp.scale / 2, stamp.scale, stamp.scale);
-    cctx.restore();
+async function writeToHandle(handle: FileSystemFileHandle, blob: Blob) {
+  const writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+// 保存ボタン: 上書きチェックON → 元ファイルに上書き / OFF → 名前を付けて保存
+saveBtn.addEventListener("click", async () => {
+  const blob = await renderToBlob();
+
+  if (overwriteCheck.checked && sourceFileHandle) {
+    try {
+      await writeToHandle(sourceFileHandle, blob);
+      statusEl.textContent = `${currentFileName} に上書き保存しました`;
+      return;
+    } catch (err) {
+      statusEl.textContent = "上書き保存に失敗しました。名前を付けて保存します。";
+    }
   }
 
-  const dataUrl = c.toDataURL("image/png");
-  const saveName = `${currentFileName.replace(/\.[^.]+$/, "")}.png`;
-  const a = document.createElement("a"); a.download = saveName; a.href = dataUrl; a.click();
-  statusEl.textContent = `${saveName} をダウンロードしました`;
+  // showSaveFilePicker で保存先選択
+  if ("showSaveFilePicker" in window) {
+    try {
+      const handle = await (window as any).showSaveFilePicker({
+        suggestedName: `${currentFileName.replace(/\.[^.]+$/, "")}.png`,
+        types: [{ description: "PNG Image", accept: { "image/png": [".png"] } }],
+      });
+      await writeToHandle(handle, blob);
+      statusEl.textContent = `${handle.name} に保存しました`;
+      return;
+    } catch { return; /* cancelled */ }
+  }
+
+  // フォールバック: ダウンロード
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.download = `${currentFileName.replace(/\.[^.]+$/, "")}.png`;
+  a.href = url; a.click();
+  URL.revokeObjectURL(url);
+  statusEl.textContent = `${a.download} をダウンロードしました`;
+});
+
+// 名前を付けて保存ボタン: 常に保存先選択
+saveAsBtn.addEventListener("click", async () => {
+  const blob = await renderToBlob();
+
+  if ("showSaveFilePicker" in window) {
+    try {
+      const handle = await (window as any).showSaveFilePicker({
+        suggestedName: `${currentFileName.replace(/\.[^.]+$/, "")}.png`,
+        types: [{ description: "PNG Image", accept: { "image/png": [".png"] } }],
+      });
+      await writeToHandle(handle, blob);
+      statusEl.textContent = `${handle.name} に保存しました`;
+      return;
+    } catch { return; }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.download = `${currentFileName.replace(/\.[^.]+$/, "")}.png`;
+  a.href = url; a.click();
+  URL.revokeObjectURL(url);
+  statusEl.textContent = `${a.download} をダウンロードしました`;
 });
