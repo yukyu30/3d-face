@@ -32,6 +32,12 @@ export function createDb(dbPath: string): Database.Database {
     );
   `);
 
+  // マイグレーション: 既存modelsテーブルにtype列がない場合追加
+  const cols = db.pragma("table_info(models)") as { name: string }[];
+  if (cols.length > 0 && !cols.some((c) => c.name === "type")) {
+    db.exec("ALTER TABLE models ADD COLUMN type TEXT NOT NULL DEFAULT 'model3d'");
+  }
+
   return db;
 }
 

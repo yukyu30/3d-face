@@ -140,8 +140,9 @@ app.whenReady().then(() => {
 
   ipcMain.handle("model:readFile", (_event, storedPath: string) => {
     if (!fs.existsSync(storedPath)) return null;
+    // Uint8Arrayで返す（Electron IPCでの安全な転送のため）
     const buffer = fs.readFileSync(storedPath);
-    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    return new Uint8Array(buffer);
   });
 
   // --- ファイル保存 ---

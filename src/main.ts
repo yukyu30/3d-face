@@ -19,7 +19,7 @@ declare global {
       importModel: () => Promise<StoredModel | null>;
       importImage: () => Promise<StoredModel | null>;
       deleteModel: (id: string) => Promise<void>;
-      readModelFile: (storedPath: string) => Promise<ArrayBuffer | null>;
+      readModelFile: (storedPath: string) => Promise<Uint8Array | null>;
       saveFile: (defaultName: string, dataUrl: string) => Promise<string | null>;
     };
     FaceMesh: any;
@@ -33,9 +33,10 @@ interface MaskEntry {
   offsetX: number;
   offsetY: number;
   scaleMultiplier: number;
-  rotOffsetX: number; // pitch (上下)
-  rotOffsetY: number; // yaw (左右)
-  rotOffsetZ: number; // roll (傾き)
+  rotOffsetX: number; // 領域のpitch
+  rotOffsetY: number; // 領域のyaw
+  rotOffsetZ: number; // 領域のroll
+  modelQuat: THREE.Quaternion; // モデル自体のアークボール回転
   basePosition: { x: number; y: number };
   baseScale: number;
   baseAngles: { pitch: number; yaw: number; roll: number };
@@ -74,6 +75,8 @@ async function main() {
   const detectBtn = document.getElementById("detectBtn") as HTMLButtonElement;
   const addMaskBtn = document.getElementById("addMaskBtn") as HTMLButtonElement;
   const saveBtn = document.getElementById("saveBtn") as HTMLButtonElement;
+  const swapImageBtn = document.getElementById("swapImageBtn") as HTMLButtonElement;
+  const swapFileInput = document.getElementById("swapFileInput") as HTMLInputElement;
   const importModelBtn = document.getElementById("importModelBtn") as HTMLButtonElement;
   const importImageBtn = document.getElementById("importImageBtn") as HTMLButtonElement;
   const registerBtn = document.getElementById("registerBtn") as HTMLButtonElement;
@@ -157,11 +160,14 @@ async function main() {
       const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
       entry.mesh.position.set(px, py, 0);
       entry.mesh.scale.set(s, s, s);
-      entry.mesh.rotation.set(
+      // 領域回転 + モデル自体のアークボール回転を合成
+      const baseQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(
         entry.baseAngles.pitch + entry.rotOffsetX,
         -(entry.baseAngles.yaw) + entry.rotOffsetY,
         -(entry.baseAngles.roll) + entry.rotOffsetZ
-      );
+      ));
+      const finalQ = baseQ.multiply(entry.modelQuat);
+      entry.mesh.quaternion.copy(finalQ);
     }
 
     renderer.render(scene, camera);
@@ -194,7 +200,7 @@ async function main() {
     return { cx, cy, hw, hh, s };
   }
 
-  type HandleType = "move" | "scale-tl" | "scale-tr" | "scale-bl" | "scale-br" | "rotX-top" | "rotX-bot" | "rotY-left" | "rotY-right" | "rotZ";
+  type HandleType = "move" | "scale-tl" | "scale-tr" | "scale-bl" | "scale-br" | "rotX-top" | "rotX-bot" | "rotY-left" | "rotY-right" | "rotZ" | "move-handle";
 
   interface HandleDef { type: HandleType; x: number; y: number; }
 
@@ -214,6 +220,8 @@ async function main() {
       { type: "rotY-right", x: cx + hw + 20, y: cy },
       // 右上外側: Z回転 (青)
       { type: "rotZ", x: cx + hw + 14, y: cy - hh - 14 },
+      // 中央: 移動ハンドル (白)
+      { type: "move-handle", x: cx, y: cy },
     ];
   }
 
@@ -278,6 +286,20 @@ async function main() {
         c.textAlign = "center";
         c.textBaseline = "middle";
         c.fillText("Z", h.x, h.y);
+      } else if (h.type === "move-handle") {
+        // 移動ハンドル (白い十字)
+        c.beginPath();
+        c.arc(h.x, h.y, HANDLE_RADIUS + 2, 0, Math.PI * 2);
+        c.fillStyle = COLORS.move;
+        c.fill();
+        c.strokeStyle = "#000";
+        c.lineWidth = 1;
+        c.stroke();
+        // 十字矢印
+        c.strokeStyle = "#333";
+        c.lineWidth = 2;
+        c.beginPath(); c.moveTo(h.x - 5, h.y); c.lineTo(h.x + 5, h.y); c.stroke();
+        c.beginPath(); c.moveTo(h.x, h.y - 5); c.lineTo(h.x, h.y + 5); c.stroke();
       }
     }
 
@@ -294,13 +316,15 @@ async function main() {
   }
 
   // --- ドラッグ操作 ---
-  type DragMode = "none" | "move" | "scale" | "rotX" | "rotY" | "rotZ";
+  type DragMode = "none" | "move" | "scale" | "rotX" | "rotY" | "rotZ" | "arcball";
   let isDragging = false;
   let dragMode: DragMode = "none";
   let dragStartX = 0, dragStartY = 0;
   let dragStartOffsetX = 0, dragStartOffsetY = 0;
   let dragStartScale = 1;
   let dragStartRotX = 0, dragStartRotY = 0, dragStartRotZ = 0;
+  let dragStartQuat = new THREE.Quaternion();
+  let lastArcballX = 0, lastArcballY = 0;
 
   function hitTestHandles(px: number, py: number, entry: MaskEntry): DragMode {
     const img = preview;
@@ -313,6 +337,7 @@ async function main() {
     for (const h of handles) {
       const dist = Math.sqrt((px - h.x) ** 2 + (py - h.y) ** 2);
       if (dist <= HANDLE_RADIUS + 4) {
+        if (h.type === "move-handle") return "move";
         if (h.type.startsWith("scale")) return "scale";
         if (h.type.startsWith("rotX")) return "rotX";
         if (h.type.startsWith("rotY")) return "rotY";
@@ -339,7 +364,7 @@ async function main() {
 
   const cursors: Record<DragMode, string> = {
     none: "default", move: "grabbing", scale: "nwse-resize",
-    rotX: "ns-resize", rotY: "ew-resize", rotZ: "alias",
+    rotX: "ns-resize", rotY: "ew-resize", rotZ: "alias", arcball: "all-scroll",
   };
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -365,16 +390,20 @@ async function main() {
     }
 
     // 2) マスク本体のクリック判定
+    //    - 選択済みのマスク本体 → arcball回転
+    //    - 未選択のマスク本体 → 選択 + arcball回転
     const hit = findMaskAtPoint(px, py);
     if (hit) {
       selectedMaskId = hit.id;
       isDragging = true;
-      dragMode = "move";
+      dragMode = "arcball";
       dragStartX = px; dragStartY = py;
+      lastArcballX = px; lastArcballY = py;
+      dragStartQuat = hit.modelQuat.clone();
       dragStartOffsetX = hit.offsetX; dragStartOffsetY = hit.offsetY;
       dragStartScale = hit.scaleMultiplier;
       dragStartRotX = hit.rotOffsetX; dragStartRotY = hit.rotOffsetY; dragStartRotZ = hit.rotOffsetZ;
-      canvas.style.cursor = "grabbing";
+      canvas.style.cursor = "all-scroll";
     } else {
       selectedMaskId = null;
       dragMode = "none";
@@ -424,6 +453,20 @@ async function main() {
       case "rotZ":
         entry.rotOffsetZ = dragStartRotZ + dx * 0.01;
         break;
+      case "arcball": {
+        // アークボール: ドラッグ差分から回転クォータニオンを生成
+        const adx = px - lastArcballX;
+        const ady = py - lastArcballY;
+        lastArcballX = px;
+        lastArcballY = py;
+        const speed = 0.005;
+        // Yドラッグ → X軸回転、Xドラッグ → Y軸回転
+        const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), ady * speed);
+        const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), adx * speed);
+        const delta = qx.multiply(qy);
+        entry.modelQuat.premultiply(delta);
+        break;
+      }
     }
   });
 
@@ -459,7 +502,14 @@ async function main() {
   });
   fileInput.addEventListener("change", () => { if (fileInput.files?.[0]) handleFile(fileInput.files[0]); });
 
-  function handleFile(file: File) {
+  // 画像切替（マスク設定を保持）
+  swapImageBtn.addEventListener("click", () => swapFileInput.click());
+  swapFileInput.addEventListener("change", () => {
+    if (swapFileInput.files?.[0]) handleFile(swapFileInput.files[0], true);
+    swapFileInput.value = "";
+  });
+
+  function handleFile(file: File, keepMasks = false) {
     currentFileName = file.name;
     fileNameEl.textContent = currentFileName;
     const reader = new FileReader();
@@ -472,7 +522,12 @@ async function main() {
         detectBtn.disabled = false;
         addMaskBtn.disabled = false;
         saveBtn.disabled = false;
-        statusEl.textContent = "";
+        swapImageBtn.disabled = false;
+        if (!keepMasks) {
+          statusEl.textContent = "";
+        } else {
+          statusEl.textContent = "画像を切り替えました（マスク設定を引き継ぎ）";
+        }
       };
     };
     reader.readAsDataURL(file);
@@ -524,7 +579,7 @@ async function main() {
             const entry: MaskEntry = {
               id: nextMaskId++,
               label: person ? person.name : `顔 ${i + 1}`,
-              mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotOffsetX: 0, rotOffsetY: 0, rotOffsetZ: 0,
+              mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotOffsetX: 0, rotOffsetY: 0, rotOffsetZ: 0, modelQuat: new THREE.Quaternion(), modelQuat: new THREE.Quaternion(),
               basePosition: { x: tf.position.x, y: tf.position.y },
               baseScale: tf.scale,
               baseAngles: { pitch: angles.pitch, yaw: angles.yaw, roll: angles.roll },
@@ -550,7 +605,7 @@ async function main() {
     const entry: MaskEntry = {
       id: nextMaskId++,
       label: `マスク ${nextMaskId - 1}`,
-      mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotOffsetX: 0, rotOffsetY: 0, rotOffsetZ: 0,
+      mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotOffsetX: 0, rotOffsetY: 0, rotOffsetZ: 0, modelQuat: new THREE.Quaternion(),
       basePosition: { x: preview.naturalWidth / 2, y: preview.naturalHeight / 2 },
       baseScale: Math.min(preview.naturalWidth, preview.naturalHeight) * 0.25,
       baseAngles: { pitch: 0, yaw: 0, roll: 0 },
@@ -578,8 +633,10 @@ async function main() {
       return await loadImagePlane(model);
     }
 
-    const buffer = await window.electronAPI!.readModelFile(model.storedPath);
-    if (!buffer) return createDefaultBox();
+    const rawBuffer = await window.electronAPI!.readModelFile(model.storedPath);
+    if (!rawBuffer) return createDefaultBox();
+    // Uint8ArrayからArrayBufferに変換（GLTFLoaderに必要）
+    const buffer = rawBuffer instanceof Uint8Array ? rawBuffer.buffer.slice(rawBuffer.byteOffset, rawBuffer.byteOffset + rawBuffer.byteLength) : rawBuffer;
 
     return new Promise((resolve) => {
       gltfLoader.parse(buffer, "", (gltf) => {
@@ -606,10 +663,10 @@ async function main() {
   }
 
   async function loadImagePlane(model: StoredModel): Promise<THREE.Object3D> {
-    const buffer = await window.electronAPI!.readModelFile(model.storedPath);
-    if (!buffer) return createDefaultBox();
+    const rawBuffer = await window.electronAPI!.readModelFile(model.storedPath);
+    if (!rawBuffer) return createDefaultBox();
 
-    const blob = new Blob([buffer]);
+    const blob = new Blob([rawBuffer]);
     const url = URL.createObjectURL(blob);
 
     return new Promise((resolve) => {
@@ -788,11 +845,12 @@ async function main() {
       const s = entry.baseScale * entry.scaleMultiplier;
       entry.mesh.position.set(px, py, 0);
       entry.mesh.scale.set(s, s, s);
-      entry.mesh.rotation.set(
+      const saveBaseQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(
         entry.baseAngles.pitch + entry.rotOffsetX,
         -(entry.baseAngles.yaw) + entry.rotOffsetY,
         -(entry.baseAngles.roll) + entry.rotOffsetZ
-      );
+      ));
+      entry.mesh.quaternion.copy(saveBaseQ.multiply(entry.modelQuat));
     }
     saveRenderer.render(scene, saveCam);
 
