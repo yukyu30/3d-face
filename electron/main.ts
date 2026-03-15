@@ -1,21 +1,38 @@
 import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import * as path from "path";
 import * as fs from "fs";
-import { createDb, getAllPersons, addPerson, deletePerson, addDescriptorToPerson } from "../src/db";
+import {
+  createDb,
+  getAllPersons,
+  addPerson,
+  deletePerson,
+  addDescriptorToPerson,
+  addModel,
+  getAllModels,
+  getModel,
+  deleteModel,
+} from "../src/db";
 import type Database from "better-sqlite3";
 
 let db: Database.Database;
+let modelsDir: string;
 
 function initDatabase(): void {
   const userDataPath = app.getPath("userData");
   const dbPath = path.join(userDataPath, "face3d.db");
   db = createDb(dbPath);
+
+  modelsDir = path.join(userDataPath, "models");
+  if (!fs.existsSync(modelsDir)) {
+    fs.mkdirSync(modelsDir, { recursive: true });
+  }
 }
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1400,
+    height: 900,
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -23,13 +40,21 @@ function createWindow(): void {
     },
   });
 
-  // 開発時はViteサーバー、本番時はビルド済みファイルを読み込み
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  const htmlPath = path.join(__dirname, "../../dist/index.html");
+
   const isDev = process.env.NODE_ENV === "development";
   if (isDev) {
     mainWindow.loadURL("http://localhost:3000");
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+    mainWindow.loadFile(htmlPath).catch((err) => {
+      console.error("Failed to load HTML:", err);
+    });
   }
 }
 
@@ -37,24 +62,64 @@ app.whenReady().then(() => {
   initDatabase();
   createWindow();
 
-  // IPC ハンドラー
-  ipcMain.handle("db:getAllPersons", () => {
-    return getAllPersons(db);
+  // --- 人物管理 IPC ---
+  ipcMain.handle("db:getAllPersons", () => getAllPersons(db));
+
+  ipcMain.handle("db:addPerson", (_event, name: string, modelUrl: string, descriptors: { embedding: number[] }[]) =>
+    addPerson(db, name, modelUrl, descriptors)
+  );
+
+  ipcMain.handle("db:deletePerson", (_event, id: string) => deletePerson(db, id));
+
+  ipcMain.handle("db:addDescriptor", (_event, personId: string, descriptor: { embedding: number[] }) =>
+    addDescriptorToPerson(db, personId, descriptor)
+  );
+
+  // --- 3Dモデル管理 IPC ---
+  ipcMain.handle("model:getAll", () => getAllModels(db));
+
+  ipcMain.handle("model:get", (_event, id: string) => getModel(db, id));
+
+  ipcMain.handle("model:import", async () => {
+    const result = await dialog.showOpenDialog({
+      title: "3Dモデルをインポート",
+      filters: [
+        { name: "3D Models", extensions: ["glb", "gltf", "obj", "fbx"] },
+      ],
+      properties: ["openFile"],
+    });
+
+    if (result.canceled || result.filePaths.length === 0) return null;
+
+    const srcPath = result.filePaths[0];
+    const originalName = path.basename(srcPath);
+    const ext = path.extname(originalName);
+    const baseName = path.basename(originalName, ext);
+    const timestamp = Date.now();
+    const storedName = `${baseName}_${timestamp}${ext}`;
+    const storedPath = path.join(modelsDir, storedName);
+
+    fs.copyFileSync(srcPath, storedPath);
+
+    const model = addModel(db, baseName, originalName, storedPath);
+    return model;
   });
 
-  ipcMain.handle("db:addPerson", (_event, name: string, modelUrl: string, descriptors: { embedding: number[] }[]) => {
-    return addPerson(db, name, modelUrl, descriptors);
+  ipcMain.handle("model:delete", (_event, id: string) => {
+    const model = getModel(db, id);
+    if (model && fs.existsSync(model.storedPath)) {
+      fs.unlinkSync(model.storedPath);
+    }
+    deleteModel(db, id);
   });
 
-  ipcMain.handle("db:deletePerson", (_event, id: string) => {
-    deletePerson(db, id);
+  ipcMain.handle("model:readFile", (_event, storedPath: string) => {
+    if (!fs.existsSync(storedPath)) return null;
+    const buffer = fs.readFileSync(storedPath);
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
   });
 
-  ipcMain.handle("db:addDescriptor", (_event, personId: string, descriptor: { embedding: number[] }) => {
-    addDescriptorToPerson(db, personId, descriptor);
-  });
-
-  // ファイル保存ダイアログ
+  // --- ファイル保存 ---
   ipcMain.handle("dialog:saveFile", async (_event, defaultName: string, dataUrl: string) => {
     const result = await dialog.showSaveDialog({
       defaultPath: defaultName,

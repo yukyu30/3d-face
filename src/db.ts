@@ -21,6 +21,14 @@ export function createDb(dbPath: string): Database.Database {
       embedding TEXT NOT NULL,
       FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS models (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      stored_path TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   return db;
@@ -93,4 +101,69 @@ export function addDescriptorToPerson(
   db.prepare(
     "INSERT INTO descriptors (person_id, embedding) VALUES (?, ?)"
   ).run(personId, JSON.stringify(descriptor.embedding));
+}
+
+// --- 3Dモデル管理 ---
+
+export interface StoredModel {
+  id: string;
+  name: string;
+  originalName: string;
+  storedPath: string;
+  createdAt: string;
+}
+
+export function addModel(
+  db: Database.Database,
+  name: string,
+  originalName: string,
+  storedPath: string
+): StoredModel {
+  const id = randomUUID();
+  db.prepare(
+    "INSERT INTO models (id, name, original_name, stored_path) VALUES (?, ?, ?, ?)"
+  ).run(id, name, originalName, storedPath);
+
+  return { id, name, originalName, storedPath, createdAt: new Date().toISOString() };
+}
+
+export function getAllModels(db: Database.Database): StoredModel[] {
+  const rows = db.prepare("SELECT * FROM models ORDER BY created_at DESC").all() as {
+    id: string;
+    name: string;
+    original_name: string;
+    stored_path: string;
+    created_at: string;
+  }[];
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    originalName: r.original_name,
+    storedPath: r.stored_path,
+    createdAt: r.created_at,
+  }));
+}
+
+export function getModel(db: Database.Database, id: string): StoredModel | null {
+  const row = db.prepare("SELECT * FROM models WHERE id = ?").get(id) as {
+    id: string;
+    name: string;
+    original_name: string;
+    stored_path: string;
+    created_at: string;
+  } | undefined;
+
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    originalName: row.original_name,
+    storedPath: row.stored_path,
+    createdAt: row.created_at,
+  };
+}
+
+export function deleteModel(db: Database.Database, id: string): void {
+  db.prepare("DELETE FROM models WHERE id = ?").run(id);
 }

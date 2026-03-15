@@ -3,6 +3,8 @@ import { Point3D, FaceAngles } from "./faceAngle";
 export interface FaceTransform {
   position: { x: number; y: number };
   scale: number;
+  faceWidth: number;
+  faceHeight: number;
   angles: FaceAngles;
 }
 
@@ -12,7 +14,6 @@ export function calculateFaceTransform(
   imageHeight: number,
   angles: FaceAngles
 ): FaceTransform {
-  // ランドマークのバウンディングボックスを計算
   let minX = Infinity,
     minY = Infinity,
     maxX = -Infinity,
@@ -25,18 +26,17 @@ export function calculateFaceTransform(
     if (lm.y > maxY) maxY = lm.y;
   }
 
-  // 中心位置をピクセル座標に変換
   const centerX = ((minX + maxX) / 2) * imageWidth;
   const centerY = ((minY + maxY) / 2) * imageHeight;
-
-  // バウンディングボックスの対角線長をスケールとする
-  const width = (maxX - minX) * imageWidth;
-  const height = (maxY - minY) * imageHeight;
-  const scale = Math.sqrt(width * width + height * height);
+  const faceWidth = (maxX - minX) * imageWidth;
+  const faceHeight = (maxY - minY) * imageHeight;
+  const scale = Math.max(faceWidth, faceHeight);
 
   return {
     position: { x: centerX, y: centerY },
     scale,
+    faceWidth,
+    faceHeight,
     angles,
   };
 }

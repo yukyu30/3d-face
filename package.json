@@ -6,15 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "electron:dev": "vite build && tsc -p tsconfig.electron.json && electron .",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "electron:build": "vite build && tsc -p tsconfig.electron.json && electron-rebuild -m . -f",
+    "electron:dev": "vite build && tsc -p tsconfig.electron.json && electron-rebuild -m . -f && electron .",
+    "test": "npm rebuild better-sqlite3 && vitest run",
+    "test:watch": "npm rebuild better-sqlite3 && vitest"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/three": "^0.183.1",
     "electron-builder": "^26.8.1",
@@ -25,6 +27,7 @@
   "dependencies": {
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/face_mesh": "^0.4.1633559619",
+    "@vladmandic/face-api": "^1.7.15",
     "better-sqlite3": "^12.8.0",
     "electron": "^41.0.2",
     "three": "^0.183.2"
