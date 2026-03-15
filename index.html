@@ -14,12 +14,11 @@
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         background: #1a1a2e;
         color: #eee;
-        min-height: 100vh;
+        height: 100vh;
         overflow: hidden;
       }
-      .app { display: grid; grid-template-columns: 1fr 320px; height: 100vh; }
+      .app { display: grid; grid-template-columns: 1fr 280px; height: 100vh; }
 
-      /* --- Canvas Area --- */
       .canvas-area {
         position: relative;
         display: flex;
@@ -33,10 +32,13 @@
         max-height: 100%;
         display: none;
         position: absolute;
+        user-select: none;
+        -webkit-user-drag: none;
       }
-      #threeCanvas {
+      #interactionCanvas {
         position: absolute;
-        pointer-events: none;
+        cursor: default;
+        z-index: 5;
       }
       .drop-zone {
         position: absolute;
@@ -49,27 +51,23 @@
         font-size: 18px;
         cursor: pointer;
         z-index: 10;
-        transition: border-color 0.2s;
       }
       .drop-zone:hover, .drop-zone.dragover { border-color: #e94560; color: #e94560; }
       .drop-zone.hidden { display: none; }
 
-      /* --- Controls bar --- */
       .controls-bar {
         position: absolute;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        background: rgba(0,0,0,0.7);
-        padding: 12px 20px;
+        bottom: 0; left: 0; right: 0;
+        background: rgba(0,0,0,0.75);
+        padding: 10px 16px;
         display: flex;
-        gap: 10px;
+        gap: 8px;
         align-items: center;
         z-index: 20;
       }
-      .controls-bar .file-name { font-size: 12px; color: #aaa; flex: 1; }
+      .controls-bar .file-name { font-size: 11px; color: #aaa; flex: 1; }
+      .controls-bar .hint { font-size: 10px; color: #888; }
 
-      /* --- Sidebar --- */
       .sidebar {
         background: #16213e;
         overflow-y: auto;
@@ -77,113 +75,90 @@
         flex-direction: column;
         border-left: 1px solid #0f3460;
       }
-      .panel { padding: 14px; border-bottom: 1px solid #0f3460; }
+      .panel { padding: 12px; border-bottom: 1px solid #0f3460; }
       .panel h2 {
-        font-size: 12px;
+        font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 1px;
         color: #e94560;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
       }
 
-      /* --- Buttons --- */
       button {
         background: #e94560;
         color: white;
         border: none;
-        padding: 8px 16px;
-        border-radius: 6px;
+        padding: 7px 14px;
+        border-radius: 5px;
         cursor: pointer;
-        font-size: 13px;
-        transition: background 0.2s;
+        font-size: 12px;
       }
       button:hover { background: #c73e54; }
       button:disabled { background: #444; cursor: not-allowed; }
       button.secondary { background: #0f3460; }
       button.secondary:hover { background: #1a5276; }
-      button.small { padding: 4px 8px; font-size: 11px; }
+      button.small { padding: 3px 7px; font-size: 10px; }
       button.danger { background: #c0392b; }
+      button.full { width: 100%; margin-bottom: 6px; }
 
-      /* --- Inputs --- */
       input[type="text"], select {
         width: 100%;
-        padding: 6px 10px;
+        padding: 5px 8px;
         border-radius: 4px;
         border: 1px solid #333;
         background: #0f3460;
         color: #eee;
-        font-size: 13px;
-        margin-bottom: 6px;
+        font-size: 12px;
+        margin-bottom: 5px;
       }
-      label { display: block; font-size: 11px; color: #aaa; margin-bottom: 3px; }
+      label { display: block; font-size: 10px; color: #aaa; margin-bottom: 2px; }
 
-      /* --- Mask list --- */
       .mask-item {
         background: #0f3460;
-        border-radius: 6px;
-        padding: 8px;
-        margin-bottom: 6px;
-        font-size: 12px;
-      }
-      .mask-item .mask-header {
+        border-radius: 5px;
+        padding: 7px;
+        margin-bottom: 5px;
+        font-size: 11px;
         display: flex;
         justify-content: space-between;
         align-items: center;
-        margin-bottom: 6px;
+        cursor: pointer;
+        border: 2px solid transparent;
       }
-      .mask-item .mask-header span { font-weight: bold; }
-      .mask-item .slider-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-bottom: 3px;
-      }
-      .mask-item .slider-row label { margin: 0; min-width: 24px; }
-      .mask-item input[type="range"] { flex: 1; }
+      .mask-item.selected { border-color: #e94560; }
+      .mask-item .mask-info { display: flex; align-items: center; gap: 6px; }
+      .mask-item .color-dot { width: 10px; height: 10px; border-radius: 50%; }
 
-      /* --- Model list --- */
-      .model-item {
+      .model-item, .registry-item {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 6px 8px;
+        padding: 5px 7px;
         background: #0f3460;
         border-radius: 4px;
         margin-bottom: 4px;
-        font-size: 12px;
+        font-size: 11px;
       }
 
-      /* --- Registry --- */
-      .registry-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 6px 8px;
-        background: #0f3460;
-        border-radius: 4px;
-        margin-bottom: 4px;
-        font-size: 12px;
-      }
-
-      .status { font-size: 12px; color: #aaa; padding: 6px 0; }
-
+      .status { font-size: 11px; color: #aaa; padding: 4px 0; }
       input[type="file"] { display: none; }
     </style>
   </head>
   <body>
     <div class="app">
-      <div class="canvas-area">
+      <div class="canvas-area" id="canvasArea">
         <div id="dropZone" class="drop-zone">
           画像をドラッグ＆ドロップ、またはクリックして選択
         </div>
         <input type="file" id="fileInput" accept="image/*" />
         <img id="preview" alt="" />
-        <canvas id="threeCanvas"></canvas>
+        <canvas id="interactionCanvas"></canvas>
 
         <div class="controls-bar">
           <span id="fileName" class="file-name"></span>
+          <span class="hint">ドラッグ:移動 / スクロール:拡縮 / Shift+ドラッグ:回転</span>
           <button id="detectBtn" disabled>顔検出</button>
-          <button id="addMaskBtn" class="secondary" disabled>手動マスク追加</button>
+          <button id="addMaskBtn" class="secondary" disabled>+マスク</button>
           <button id="saveBtn" disabled>保存</button>
         </div>
       </div>
@@ -196,8 +171,9 @@
         </div>
 
         <div class="panel">
-          <h2>3Dモデル管理</h2>
-          <button id="importModelBtn" style="width:100%;margin-bottom:8px">モデルをインポート</button>
+          <h2>アセット管理</h2>
+          <button id="importModelBtn" class="full secondary">3Dモデルをインポート</button>
+          <button id="importImageBtn" class="full secondary">画像をインポート</button>
           <div id="modelList"></div>
         </div>
 
@@ -205,11 +181,9 @@
           <h2>人物登録</h2>
           <label>名前</label>
           <input type="text" id="personName" placeholder="名前" />
-          <label>使用モデル</label>
-          <select id="personModelSelect">
-            <option value="">デフォルト（ボックス）</option>
-          </select>
-          <button id="registerBtn" style="width:100%;margin-top:6px">この顔を登録</button>
+          <label>使用アセット</label>
+          <select id="personModelSelect"><option value="">デフォルト</option></select>
+          <button id="registerBtn" class="full" style="margin-top:4px">この顔を登録</button>
         </div>
 
         <div class="panel">

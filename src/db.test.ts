@@ -124,16 +124,27 @@ describe("3Dモデル管理", () => {
   });
 
   it("3Dモデルを登録できる", () => {
-    const model = addModel(db, "キューブ", "cube.glb", "/stored/path/cube.glb");
+    const model = addModel(db, "キューブ", "cube.glb", "/stored/path/cube.glb", "model3d");
     expect(model.id).toBeTruthy();
     expect(model.name).toBe("キューブ");
     expect(model.originalName).toBe("cube.glb");
     expect(model.storedPath).toBe("/stored/path/cube.glb");
+    expect(model.type).toBe("model3d");
+  });
+
+  it("画像アセットを登録できる", () => {
+    const model = addModel(db, "スマイル", "smile.png", "/stored/path/smile.png", "image");
+    expect(model.type).toBe("image");
+  });
+
+  it("typeが未指定の場合model3dになる", () => {
+    const model = addModel(db, "キューブ", "cube.glb", "/stored/path/cube.glb");
+    expect(model.type).toBe("model3d");
   });
 
   it("全モデルを取得できる", () => {
-    addModel(db, "キューブ", "cube.glb", "/path/cube.glb");
-    addModel(db, "球体", "sphere.glb", "/path/sphere.glb");
+    addModel(db, "キューブ", "cube.glb", "/path/cube.glb", "model3d");
+    addModel(db, "球体", "sphere.glb", "/path/sphere.glb", "model3d");
 
     const models = getAllModels(db);
     expect(models).toHaveLength(2);

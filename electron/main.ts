@@ -101,7 +101,32 @@ app.whenReady().then(() => {
 
     fs.copyFileSync(srcPath, storedPath);
 
-    const model = addModel(db, baseName, originalName, storedPath);
+    const model = addModel(db, baseName, originalName, storedPath, "model3d");
+    return model;
+  });
+
+  ipcMain.handle("model:importImage", async () => {
+    const result = await dialog.showOpenDialog({
+      title: "画像をインポート",
+      filters: [
+        { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "svg"] },
+      ],
+      properties: ["openFile"],
+    });
+
+    if (result.canceled || result.filePaths.length === 0) return null;
+
+    const srcPath = result.filePaths[0];
+    const originalName = path.basename(srcPath);
+    const ext = path.extname(originalName);
+    const baseName = path.basename(originalName, ext);
+    const timestamp = Date.now();
+    const storedName = `${baseName}_${timestamp}${ext}`;
+    const storedPath = path.join(modelsDir, storedName);
+
+    fs.copyFileSync(srcPath, storedPath);
+
+    const model = addModel(db, baseName, originalName, storedPath, "image");
     return model;
   });
 

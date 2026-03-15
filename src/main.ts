@@ -3,14 +3,9 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { calculateFaceAngles, Point3D } from "./faceAngle";
 import { calculateFaceTransform } from "./faceTransform";
 import { RegisteredPerson, findMatchingPerson, FaceDescriptor } from "./faceRegistry";
-import type { StoredModel } from "./db";
+import type { StoredModel, ModelType } from "./db";
 
-// MediaPipe ランドマークインデックス
-const NOSE_TIP = 1;
-const FOREHEAD = 10;
-const CHIN = 152;
-const LEFT_EYE = 33;
-const RIGHT_EYE = 263;
+const NOSE_TIP = 1, FOREHEAD = 10, CHIN = 152, LEFT_EYE = 33, RIGHT_EYE = 263;
 
 declare global {
   interface Window {
@@ -22,6 +17,7 @@ declare global {
       getAllModels: () => Promise<StoredModel[]>;
       getModel: (id: string) => Promise<StoredModel | null>;
       importModel: () => Promise<StoredModel | null>;
+      importImage: () => Promise<StoredModel | null>;
       deleteModel: (id: string) => Promise<void>;
       readModelFile: (storedPath: string) => Promise<ArrayBuffer | null>;
       saveFile: (defaultName: string, dataUrl: string) => Promise<string | null>;
@@ -30,21 +26,18 @@ declare global {
   }
 }
 
-// --- マスクエントリ（UI上の各マスク） ---
 interface MaskEntry {
   id: number;
   label: string;
   mesh: THREE.Object3D;
-  // ユーザー調整値
   offsetX: number;
   offsetY: number;
   scaleMultiplier: number;
   rotationOffsetY: number;
-  // 検出情報
-  detectedPosition: { x: number; y: number } | null;
-  detectedScale: number;
-  detectedAngles: { pitch: number; yaw: number; roll: number };
-  modelId: string; // "" = デフォルトボックス
+  basePosition: { x: number; y: number };
+  baseScale: number;
+  baseAngles: { pitch: number; yaw: number; roll: number };
+  modelId: string;
 }
 
 function landmarksToDescriptor(landmarks: { x: number; y: number; z: number }[]): FaceDescriptor {
@@ -52,8 +45,7 @@ function landmarksToDescriptor(landmarks: { x: number; y: number; z: number }[])
   const embedding: number[] = [];
   for (let i = 0; i < keyIndices.length; i++) {
     for (let j = i + 1; j < keyIndices.length; j++) {
-      const a = landmarks[keyIndices[i]];
-      const b = landmarks[keyIndices[j]];
+      const a = landmarks[keyIndices[i]], b = landmarks[keyIndices[j]];
       embedding.push(Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2));
     }
   }
@@ -62,22 +54,26 @@ function landmarksToDescriptor(landmarks: { x: number; y: number; z: number }[])
   return { embedding };
 }
 
-function createDefaultBox(): THREE.Mesh {
+function createDefaultBox(hue = 220): THREE.Mesh {
   const geo = new THREE.BoxGeometry(1, 1.3, 0.6);
-  const mat = new THREE.MeshPhongMaterial({ color: 0x4488ff, opacity: 0.85, transparent: true });
+  const mat = new THREE.MeshPhongMaterial({
+    color: new THREE.Color(`hsl(${hue}, 70%, 50%)`),
+    opacity: 0.85,
+    transparent: true,
+  });
   return new THREE.Mesh(geo, mat);
 }
 
 async function main() {
-  // DOM
   const dropZone = document.getElementById("dropZone")!;
   const fileInput = document.getElementById("fileInput") as HTMLInputElement;
   const preview = document.getElementById("preview") as HTMLImageElement;
-  const threeCanvas = document.getElementById("threeCanvas") as HTMLCanvasElement;
+  const canvas = document.getElementById("interactionCanvas") as HTMLCanvasElement;
   const detectBtn = document.getElementById("detectBtn") as HTMLButtonElement;
   const addMaskBtn = document.getElementById("addMaskBtn") as HTMLButtonElement;
   const saveBtn = document.getElementById("saveBtn") as HTMLButtonElement;
   const importModelBtn = document.getElementById("importModelBtn") as HTMLButtonElement;
+  const importImageBtn = document.getElementById("importImageBtn") as HTMLButtonElement;
   const registerBtn = document.getElementById("registerBtn") as HTMLButtonElement;
   const maskListEl = document.getElementById("maskList") as HTMLDivElement;
   const modelListEl = document.getElementById("modelList") as HTMLDivElement;
@@ -95,9 +91,10 @@ async function main() {
   let nextMaskId = 1;
   let lastLandmarks: { x: number; y: number; z: number }[][] = [];
   let imageLoaded = false;
+  let selectedMaskId: number | null = null;
 
   // --- Three.js ---
-  const renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, alpha: true, antialias: true });
+  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
   renderer.setClearColor(0x000000, 0);
   const scene = new THREE.Scene();
   const camera = new THREE.OrthographicCamera(0, 1, 0, 1, 0.1, 1000);
@@ -108,15 +105,15 @@ async function main() {
   scene.add(dirLight);
 
   const gltfLoader = new GLTFLoader();
-  const loadedModelCache = new Map<string, THREE.Object3D>();
+  const modelCache = new Map<string, THREE.Object3D>();
 
-  // --- Data loading ---
+  // --- 2Dコンテキスト（合成レンダリング用） ---
+  const ctx = canvas.getContext("2d")!;
+
+  // --- データ読み込み ---
   async function loadRegistry() {
     if (useElectron) registry = await window.electronAPI!.getAllPersons();
-    else {
-      const d = localStorage.getItem("face3d_registry");
-      registry = d ? JSON.parse(d) : [];
-    }
+    else { const d = localStorage.getItem("face3d_registry"); registry = d ? JSON.parse(d) : []; }
   }
   async function loadModels() {
     if (useElectron) models = await window.electronAPI!.getAllModels();
@@ -125,58 +122,173 @@ async function main() {
   await loadRegistry();
   await loadModels();
 
-  // --- Render loop ---
-  function renderLoop() {
-    if (imageLoaded) {
-      updateMaskMeshes();
-      renderer.render(scene, camera);
+  // --- レンダーループ ---
+  function render() {
+    if (!imageLoaded) { requestAnimationFrame(render); return; }
+    const img = preview;
+    const rect = img.getBoundingClientRect();
+    const parent = img.parentElement!.getBoundingClientRect();
+    const ox = rect.left - parent.left;
+    const oy = rect.top - parent.top;
+    const w = rect.width, h = rect.height;
+    const sx = w / img.naturalWidth, sy = h / img.naturalHeight;
+
+    // キャンバスサイズをカンバスエリアに合わせる
+    if (canvas.width !== parent.width || canvas.height !== parent.height) {
+      canvas.width = parent.width;
+      canvas.height = parent.height;
     }
-    requestAnimationFrame(renderLoop);
-  }
-  renderLoop();
 
-  function syncCanvasSize() {
-    const img = preview;
-    if (!img.naturalWidth) return;
-    const rect = img.getBoundingClientRect();
-    renderer.setSize(rect.width, rect.height);
-    threeCanvas.style.left = `${rect.left - img.parentElement!.getBoundingClientRect().left}px`;
-    threeCanvas.style.top = `${rect.top - img.parentElement!.getBoundingClientRect().top}px`;
-    camera.right = rect.width;
-    camera.bottom = rect.height;
+    // 2Dキャンバスクリア
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Three.jsレンダラーサイズ合わせ
+    renderer.setSize(w, h);
+    camera.right = w;
+    camera.bottom = h;
     camera.updateProjectionMatrix();
-  }
 
-  function updateMaskMeshes() {
-    const img = preview;
-    if (!img.naturalWidth) return;
-    const rect = img.getBoundingClientRect();
-    const scaleX = rect.width / img.naturalWidth;
-    const scaleY = rect.height / img.naturalHeight;
-
+    // メッシュ更新
     for (const entry of maskEntries) {
-      if (!entry.detectedPosition) continue;
-      const px = entry.detectedPosition.x * scaleX + entry.offsetX;
-      const py = entry.detectedPosition.y * scaleY + entry.offsetY;
-      const s = entry.detectedScale * Math.min(scaleX, scaleY) * entry.scaleMultiplier;
-
+      const px = entry.basePosition.x * sx + entry.offsetX;
+      const py = entry.basePosition.y * sy + entry.offsetY;
+      const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
       entry.mesh.position.set(px, py, 0);
       entry.mesh.scale.set(s, s, s);
       entry.mesh.rotation.set(
-        entry.detectedAngles.pitch,
-        -(entry.detectedAngles.yaw + entry.rotationOffsetY),
-        -entry.detectedAngles.roll
+        entry.baseAngles.pitch,
+        -(entry.baseAngles.yaw + entry.rotationOffsetY),
+        -entry.baseAngles.roll
       );
     }
+
+    renderer.render(scene, camera);
+
+    // Three.js結果を2Dキャンバスの画像位置に描画
+    ctx.drawImage(renderer.domElement, ox, oy);
+
+    // 選択マスクのハイライト
+    if (selectedMaskId !== null) {
+      const entry = maskEntries.find((m) => m.id === selectedMaskId);
+      if (entry) {
+        const px = entry.basePosition.x * sx + entry.offsetX + ox;
+        const py = entry.basePosition.y * sy + entry.offsetY + oy;
+        const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
+        ctx.strokeStyle = "#e94560";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.strokeRect(px - s * 0.6, py - s * 0.75, s * 1.2, s * 1.5);
+        ctx.setLineDash([]);
+      }
+    }
+
+    requestAnimationFrame(render);
+  }
+  render();
+
+  // --- ドラッグ操作 ---
+  let isDragging = false;
+  let dragStartX = 0, dragStartY = 0;
+  let dragStartOffsetX = 0, dragStartOffsetY = 0;
+  let dragStartRotation = 0;
+  let isRotating = false;
+
+  function findMaskAtPoint(px: number, py: number): MaskEntry | null {
+    const img = preview;
+    const rect = img.getBoundingClientRect();
+    const parent = img.parentElement!.getBoundingClientRect();
+    const ox = rect.left - parent.left;
+    const oy = rect.top - parent.top;
+    const sx = rect.width / img.naturalWidth;
+    const sy = rect.height / img.naturalHeight;
+
+    // 逆順（最前面から）チェック
+    for (let i = maskEntries.length - 1; i >= 0; i--) {
+      const entry = maskEntries[i];
+      const mx = entry.basePosition.x * sx + entry.offsetX + ox;
+      const my = entry.basePosition.y * sy + entry.offsetY + oy;
+      const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
+      const halfW = s * 0.6, halfH = s * 0.75;
+      if (px >= mx - halfW && px <= mx + halfW && py >= my - halfH && py <= my + halfH) {
+        return entry;
+      }
+    }
+    return null;
   }
 
-  // --- File handling ---
+  canvas.addEventListener("pointerdown", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+
+    const hit = findMaskAtPoint(px, py);
+    if (hit) {
+      selectedMaskId = hit.id;
+      isDragging = true;
+      isRotating = e.shiftKey;
+      dragStartX = px;
+      dragStartY = py;
+      dragStartOffsetX = hit.offsetX;
+      dragStartOffsetY = hit.offsetY;
+      dragStartRotation = hit.rotationOffsetY;
+      canvas.style.cursor = isRotating ? "crosshair" : "grabbing";
+    } else {
+      selectedMaskId = null;
+    }
+    renderMaskList();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!isDragging || selectedMaskId === null) {
+      // ホバーカーソル
+      const rect = canvas.getBoundingClientRect();
+      const hit = findMaskAtPoint(e.clientX - rect.left, e.clientY - rect.top);
+      canvas.style.cursor = hit ? "grab" : "default";
+      return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const entry = maskEntries.find((m) => m.id === selectedMaskId);
+    if (!entry) return;
+
+    if (isRotating) {
+      const dx = px - dragStartX;
+      entry.rotationOffsetY = dragStartRotation + dx * 0.01;
+    } else {
+      entry.offsetX = dragStartOffsetX + (px - dragStartX);
+      entry.offsetY = dragStartOffsetY + (py - dragStartY);
+    }
+  });
+
+  canvas.addEventListener("pointerup", () => {
+    isDragging = false;
+    isRotating = false;
+    canvas.style.cursor = "default";
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    isDragging = false;
+    isRotating = false;
+  });
+
+  // スクロールで拡縮
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (selectedMaskId === null) return;
+    const entry = maskEntries.find((m) => m.id === selectedMaskId);
+    if (!entry) return;
+    const delta = e.deltaY > 0 ? 0.95 : 1.05;
+    entry.scaleMultiplier = Math.max(0.1, Math.min(5, entry.scaleMultiplier * delta));
+  }, { passive: false });
+
+  // --- ファイル処理 ---
   dropZone.addEventListener("click", () => fileInput.click());
   dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
   dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
   dropZone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropZone.classList.remove("dragover");
+    e.preventDefault(); dropZone.classList.remove("dragover");
     const f = (e as DragEvent).dataTransfer?.files[0];
     if (f) handleFile(f);
   });
@@ -195,30 +307,20 @@ async function main() {
         detectBtn.disabled = false;
         addMaskBtn.disabled = false;
         saveBtn.disabled = false;
-        syncCanvasSize();
         statusEl.textContent = "";
       };
     };
     reader.readAsDataURL(file);
   }
 
-  window.addEventListener("resize", () => { if (imageLoaded) syncCanvasSize(); });
-
-  // --- Face detection ---
+  // --- 顔検出 ---
   detectBtn.addEventListener("click", async () => {
     detectBtn.disabled = true;
     detectBtn.textContent = "検出中...";
     statusEl.textContent = "顔を検出しています...";
-
-    try {
-      await detectFaces();
-    } catch (err) {
-      console.error(err);
-      statusEl.textContent = "顔検出に失敗しました";
-    } finally {
-      detectBtn.disabled = false;
-      detectBtn.textContent = "顔検出";
-    }
+    try { await detectFaces(); }
+    catch (err) { console.error(err); statusEl.textContent = "顔検出に失敗しました"; }
+    finally { detectBtn.disabled = false; detectBtn.textContent = "顔検出"; }
   });
 
   async function detectFaces(): Promise<void> {
@@ -232,44 +334,35 @@ async function main() {
       faceMesh.setOptions({ maxNumFaces: 10, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
 
       faceMesh.onResults(async (results: any) => {
-        // 既存の自動検出マスクを削除
-        clearAutoMasks();
+        // 既存マスク全削除
+        for (const e of maskEntries) scene.remove(e.mesh);
+        maskEntries = [];
         lastLandmarks = [];
+        selectedMaskId = null;
 
-        if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-          const w = preview.naturalWidth;
-          const h = preview.naturalHeight;
+        if (results.multiFaceLandmarks?.length > 0) {
+          const w = preview.naturalWidth, h = preview.naturalHeight;
 
           for (let i = 0; i < results.multiFaceLandmarks.length; i++) {
-            const landmarks = results.multiFaceLandmarks[i];
-            lastLandmarks.push(landmarks);
+            const lm = results.multiFaceLandmarks[i];
+            lastLandmarks.push(lm);
 
-            const noseTip: Point3D = landmarks[NOSE_TIP];
-            const forehead: Point3D = landmarks[FOREHEAD];
-            const chin: Point3D = landmarks[CHIN];
-            const leftEye: Point3D = landmarks[LEFT_EYE];
-            const rightEye: Point3D = landmarks[RIGHT_EYE];
-            const angles = calculateFaceAngles(noseTip, forehead, chin, leftEye, rightEye);
-            const allPoints: Point3D[] = landmarks.map((l: any) => ({ x: l.x, y: l.y, z: l.z }));
-            const transform = calculateFaceTransform(allPoints, w, h, angles);
+            const angles = calculateFaceAngles(lm[NOSE_TIP], lm[FOREHEAD], lm[CHIN], lm[LEFT_EYE], lm[RIGHT_EYE]);
+            const allPts: Point3D[] = lm.map((l: any) => ({ x: l.x, y: l.y, z: l.z }));
+            const tf = calculateFaceTransform(allPts, w, h, angles);
 
-            // 人物識別してモデル選択
-            const descriptor = landmarksToDescriptor(landmarks);
-            const person = findMatchingPerson(descriptor, registry);
+            const desc = landmarksToDescriptor(lm);
+            const person = findMatchingPerson(desc, registry);
             const modelId = person?.modelUrl || "";
 
-            const mesh = await loadMeshForModel(modelId);
+            const mesh = await loadMeshForModel(modelId, i);
             const entry: MaskEntry = {
               id: nextMaskId++,
               label: person ? person.name : `顔 ${i + 1}`,
-              mesh,
-              offsetX: 0,
-              offsetY: 0,
-              scaleMultiplier: 1.0,
-              rotationOffsetY: 0,
-              detectedPosition: { x: transform.position.x, y: transform.position.y },
-              detectedScale: transform.scale,
-              detectedAngles: { pitch: angles.pitch, yaw: angles.yaw, roll: angles.roll },
+              mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotationOffsetY: 0,
+              basePosition: { x: tf.position.x, y: tf.position.y },
+              baseScale: tf.scale,
+              baseAngles: { pitch: angles.pitch, yaw: angles.yaw, roll: angles.roll },
               modelId,
             };
             scene.add(mesh);
@@ -280,127 +373,131 @@ async function main() {
           statusEl.textContent = "顔が検出されませんでした";
         }
         renderMaskList();
-        syncCanvasSize();
         resolve();
       });
       faceMesh.send({ image: preview }).catch(reject);
     });
   }
 
-  function clearAutoMasks() {
-    for (const entry of maskEntries) {
-      scene.remove(entry.mesh);
-    }
-    maskEntries = [];
-  }
-
   // --- 手動マスク追加 ---
   addMaskBtn.addEventListener("click", async () => {
-    const img = preview;
-    const mesh = await loadMeshForModel("");
+    const mesh = await loadMeshForModel("", maskEntries.length);
     const entry: MaskEntry = {
       id: nextMaskId++,
-      label: `手動マスク ${nextMaskId - 1}`,
-      mesh,
-      offsetX: 0,
-      offsetY: 0,
-      scaleMultiplier: 1.0,
-      rotationOffsetY: 0,
-      detectedPosition: { x: img.naturalWidth / 2, y: img.naturalHeight / 2 },
-      detectedScale: Math.min(img.naturalWidth, img.naturalHeight) * 0.3,
-      detectedAngles: { pitch: 0, yaw: 0, roll: 0 },
+      label: `マスク ${nextMaskId - 1}`,
+      mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotationOffsetY: 0,
+      basePosition: { x: preview.naturalWidth / 2, y: preview.naturalHeight / 2 },
+      baseScale: Math.min(preview.naturalWidth, preview.naturalHeight) * 0.25,
+      baseAngles: { pitch: 0, yaw: 0, roll: 0 },
       modelId: "",
     };
     scene.add(mesh);
     maskEntries.push(entry);
+    selectedMaskId = entry.id;
     renderMaskList();
-    statusEl.textContent = "手動マスクを追加しました。スライダーで位置を調整してください。";
+    statusEl.textContent = "マスクを追加しました。ドラッグで移動できます。";
   });
 
-  // --- モデル読み込み ---
-  async function loadMeshForModel(modelId: string): Promise<THREE.Object3D> {
-    if (!modelId) return createDefaultBox();
+  // --- モデル/画像ロード ---
+  async function loadMeshForModel(modelId: string, index = 0): Promise<THREE.Object3D> {
+    if (!modelId) return createDefaultBox((index * 60 + 220) % 360);
 
-    if (loadedModelCache.has(modelId)) {
-      return loadedModelCache.get(modelId)!.clone();
+    if (modelCache.has(modelId)) return modelCache.get(modelId)!.clone();
+
+    if (!useElectron) return createDefaultBox((index * 60 + 220) % 360);
+
+    const model = await window.electronAPI!.getModel(modelId);
+    if (!model) return createDefaultBox();
+
+    if (model.type === "image") {
+      return await loadImagePlane(model);
     }
 
-    if (useElectron) {
-      const model = await window.electronAPI!.getModel(modelId);
-      if (!model) return createDefaultBox();
+    const buffer = await window.electronAPI!.readModelFile(model.storedPath);
+    if (!buffer) return createDefaultBox();
 
-      const buffer = await window.electronAPI!.readModelFile(model.storedPath);
-      if (!buffer) return createDefaultBox();
-
-      return new Promise((resolve) => {
-        gltfLoader.parse(buffer, "", (gltf) => {
-          const obj = gltf.scene;
-          // モデルをバウンディングボックスで正規化
-          const box = new THREE.Box3().setFromObject(obj);
-          const size = box.getSize(new THREE.Vector3());
-          const maxDim = Math.max(size.x, size.y, size.z);
-          if (maxDim > 0) obj.scale.multiplyScalar(1 / maxDim);
-          const center = box.getCenter(new THREE.Vector3());
-          obj.position.sub(center.multiplyScalar(1 / maxDim));
-          loadedModelCache.set(modelId, obj.clone());
-          resolve(obj);
-        }, () => {
-          resolve(createDefaultBox());
-        });
-      });
-    }
-    return createDefaultBox();
+    return new Promise((resolve) => {
+      gltfLoader.parse(buffer, "", (gltf) => {
+        const obj = gltf.scene;
+        const box = new THREE.Box3().setFromObject(obj);
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) obj.scale.multiplyScalar(1 / maxDim);
+        const center = box.getCenter(new THREE.Vector3());
+        obj.position.sub(center.multiplyScalar(1 / maxDim));
+        modelCache.set(modelId, obj.clone());
+        resolve(obj);
+      }, () => resolve(createDefaultBox()));
+    });
   }
 
-  // --- Mask list UI ---
+  async function loadImagePlane(model: StoredModel): Promise<THREE.Object3D> {
+    const buffer = await window.electronAPI!.readModelFile(model.storedPath);
+    if (!buffer) return createDefaultBox();
+
+    const blob = new Blob([buffer]);
+    const url = URL.createObjectURL(blob);
+
+    return new Promise((resolve) => {
+      const loader = new THREE.TextureLoader();
+      loader.load(url, (texture) => {
+        URL.revokeObjectURL(url);
+        const aspect = texture.image.width / texture.image.height;
+        const geo = new THREE.PlaneGeometry(aspect, 1);
+        const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geo, mat);
+        modelCache.set(model.id, mesh.clone());
+        resolve(mesh);
+      }, undefined, () => {
+        URL.revokeObjectURL(url);
+        resolve(createDefaultBox());
+      });
+    });
+  }
+
+  // --- マスクリストUI ---
   function renderMaskList() {
     maskListEl.innerHTML = "";
     for (const entry of maskEntries) {
       const div = document.createElement("div");
-      div.className = "mask-item";
+      div.className = `mask-item ${entry.id === selectedMaskId ? "selected" : ""}`;
       div.innerHTML = `
-        <div class="mask-header">
+        <div class="mask-info">
           <span>${entry.label}</span>
-          <button class="small danger" data-mask-id="${entry.id}">削除</button>
         </div>
-        <div class="slider-row"><label>X</label><input type="range" min="-300" max="300" value="${entry.offsetX}" data-mask-id="${entry.id}" data-prop="offsetX" /><span>${entry.offsetX}</span></div>
-        <div class="slider-row"><label>Y</label><input type="range" min="-300" max="300" value="${entry.offsetY}" data-mask-id="${entry.id}" data-prop="offsetY" /><span>${entry.offsetY}</span></div>
-        <div class="slider-row"><label>大</label><input type="range" min="0.1" max="3" step="0.05" value="${entry.scaleMultiplier}" data-mask-id="${entry.id}" data-prop="scaleMultiplier" /><span>${entry.scaleMultiplier.toFixed(2)}</span></div>
-        <div class="slider-row"><label>回</label><input type="range" min="-3.14" max="3.14" step="0.05" value="${entry.rotationOffsetY}" data-mask-id="${entry.id}" data-prop="rotationOffsetY" /><span>${entry.rotationOffsetY.toFixed(2)}</span></div>
-        <div class="slider-row">
-          <label>型</label>
-          <select data-mask-id="${entry.id}" data-prop="modelId" style="flex:1;padding:3px;font-size:11px;background:#16213e;color:#eee;border:1px solid #333;border-radius:3px;">
+        <div style="display:flex;gap:4px;align-items:center;">
+          <select data-mask-id="${entry.id}" style="width:80px;padding:2px;font-size:10px;background:#1a1a2e;color:#eee;border:1px solid #333;border-radius:3px;">
             <option value="" ${entry.modelId === "" ? "selected" : ""}>デフォルト</option>
-            ${models.map((m) => `<option value="${m.id}" ${entry.modelId === m.id ? "selected" : ""}>${m.name}</option>`).join("")}
+            ${models.map((m) => `<option value="${m.id}" ${entry.modelId === m.id ? "selected" : ""}>${m.name}${m.type === "image" ? " [画像]" : ""}</option>`).join("")}
           </select>
+          <button class="small danger" data-del-id="${entry.id}">×</button>
         </div>
       `;
+      div.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).tagName === "BUTTON" || (e.target as HTMLElement).tagName === "SELECT" || (e.target as HTMLElement).tagName === "OPTION") return;
+        selectedMaskId = entry.id;
+        renderMaskList();
+      });
       maskListEl.appendChild(div);
     }
 
-    // イベント
-    maskListEl.querySelectorAll("button.danger").forEach((btn) => {
+    maskListEl.querySelectorAll("button[data-del-id]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
-        const id = parseInt((e.target as HTMLElement).dataset.maskId!);
-        removeMask(id);
-      });
-    });
-    maskListEl.querySelectorAll("input[type=range]").forEach((input) => {
-      input.addEventListener("input", (e) => {
-        const el = e.target as HTMLInputElement;
-        const id = parseInt(el.dataset.maskId!);
-        const prop = el.dataset.prop as keyof MaskEntry;
-        const entry = maskEntries.find((m) => m.id === id);
-        if (entry) {
-          (entry as any)[prop] = parseFloat(el.value);
-          el.nextElementSibling!.textContent = prop === "scaleMultiplier" || prop === "rotationOffsetY"
-            ? parseFloat(el.value).toFixed(2)
-            : el.value;
+        e.stopPropagation();
+        const id = parseInt((e.target as HTMLElement).dataset.delId!);
+        const idx = maskEntries.findIndex((m) => m.id === id);
+        if (idx >= 0) {
+          scene.remove(maskEntries[idx].mesh);
+          maskEntries.splice(idx, 1);
+          if (selectedMaskId === id) selectedMaskId = null;
+          renderMaskList();
         }
       });
     });
-    maskListEl.querySelectorAll("select[data-prop=modelId]").forEach((sel) => {
+
+    maskListEl.querySelectorAll("select[data-mask-id]").forEach((sel) => {
       sel.addEventListener("change", async (e) => {
+        e.stopPropagation();
         const el = e.target as HTMLSelectElement;
         const id = parseInt(el.dataset.maskId!);
         const entry = maskEntries.find((m) => m.id === id);
@@ -414,28 +511,20 @@ async function main() {
     });
   }
 
-  function removeMask(id: number) {
-    const idx = maskEntries.findIndex((m) => m.id === id);
-    if (idx >= 0) {
-      scene.remove(maskEntries[idx].mesh);
-      maskEntries.splice(idx, 1);
-      renderMaskList();
-    }
-  }
-
-  // --- Model management UI ---
+  // --- モデル管理UI ---
   function renderModelList() {
     modelListEl.innerHTML = "";
     for (const model of models) {
+      const typeLabel = model.type === "image" ? "[画像]" : "[3D]";
       const div = document.createElement("div");
       div.className = "model-item";
       div.innerHTML = `
-        <span>${model.name} <small style="color:#888">(${model.originalName})</small></span>
-        <button class="small danger" data-model-id="${model.id}">削除</button>
+        <span>${typeLabel} ${model.name}</span>
+        <button class="small danger" data-model-id="${model.id}">×</button>
       `;
       modelListEl.appendChild(div);
     }
-    modelListEl.querySelectorAll("button.danger").forEach((btn) => {
+    modelListEl.querySelectorAll("button[data-model-id]").forEach((btn) => {
       btn.addEventListener("click", async (e) => {
         const id = (e.target as HTMLElement).dataset.modelId!;
         if (useElectron) await window.electronAPI!.deleteModel(id);
@@ -447,50 +536,44 @@ async function main() {
   }
 
   function updateModelSelects() {
-    // personModelSelect更新
-    const currentVal = personModelSelect.value;
-    personModelSelect.innerHTML = `<option value="">デフォルト（ボックス）</option>`;
+    const val = personModelSelect.value;
+    personModelSelect.innerHTML = `<option value="">デフォルト</option>`;
     for (const m of models) {
-      personModelSelect.innerHTML += `<option value="${m.id}">${m.name}</option>`;
+      const label = m.type === "image" ? `${m.name} [画像]` : m.name;
+      personModelSelect.innerHTML += `<option value="${m.id}">${label}</option>`;
     }
-    personModelSelect.value = currentVal;
-    // マスクリスト内のselectも更新
+    personModelSelect.value = val;
     renderMaskList();
   }
 
   importModelBtn.addEventListener("click", async () => {
-    if (!useElectron) {
-      statusEl.textContent = "モデルインポートはElectron版でのみ利用可能です";
-      return;
-    }
+    if (!useElectron) { statusEl.textContent = "Electron版でのみ利用可能"; return; }
     const model = await window.electronAPI!.importModel();
-    if (model) {
-      await loadModels();
-      renderModelList();
-      updateModelSelects();
-      statusEl.textContent = `${model.name} をインポートしました`;
-    }
+    if (model) { await loadModels(); renderModelList(); updateModelSelects(); statusEl.textContent = `${model.name} をインポートしました`; }
+  });
+
+  importImageBtn.addEventListener("click", async () => {
+    if (!useElectron) { statusEl.textContent = "Electron版でのみ利用可能"; return; }
+    const model = await window.electronAPI!.importImage();
+    if (model) { await loadModels(); renderModelList(); updateModelSelects(); statusEl.textContent = `${model.name} [画像] をインポートしました`; }
   });
 
   renderModelList();
   updateModelSelects();
 
-  // --- Registry UI ---
+  // --- 人物登録UI ---
   function renderRegistryList() {
     registryListEl.innerHTML = "";
     for (const person of registry) {
       const modelName = models.find((m) => m.id === person.modelUrl)?.name || "デフォルト";
       const div = document.createElement("div");
       div.className = "registry-item";
-      div.innerHTML = `
-        <span>${person.name} <small style="color:#888">[${modelName}]</small></span>
-        <button class="small danger" data-person-id="${person.id}">削除</button>
-      `;
+      div.innerHTML = `<span>${person.name} <small style="color:#888">[${modelName}]</small></span><button class="small danger" data-pid="${person.id}">×</button>`;
       registryListEl.appendChild(div);
     }
-    registryListEl.querySelectorAll("button.danger").forEach((btn) => {
+    registryListEl.querySelectorAll("button[data-pid]").forEach((btn) => {
       btn.addEventListener("click", async (e) => {
-        const id = (e.target as HTMLElement).dataset.personId!;
+        const id = (e.target as HTMLElement).dataset.pid!;
         if (useElectron) await window.electronAPI!.deletePerson(id);
         registry = registry.filter((p) => p.id !== id);
         if (!useElectron) localStorage.setItem("face3d_registry", JSON.stringify(registry));
@@ -504,51 +587,57 @@ async function main() {
     const name = personNameInput.value.trim();
     if (!name) { statusEl.textContent = "名前を入力してください"; return; }
     if (lastLandmarks.length === 0) { statusEl.textContent = "まず顔検出を行ってください"; return; }
-
-    const descriptor = landmarksToDescriptor(lastLandmarks[0]);
+    const desc = landmarksToDescriptor(lastLandmarks[0]);
     const modelId = personModelSelect.value;
-
-    if (useElectron) {
-      await window.electronAPI!.addPerson(name, modelId, [descriptor]);
-      await loadRegistry();
-    } else {
-      registry.push({ id: crypto.randomUUID(), name, modelUrl: modelId, descriptors: [descriptor] });
-      localStorage.setItem("face3d_registry", JSON.stringify(registry));
-    }
+    if (useElectron) { await window.electronAPI!.addPerson(name, modelId, [desc]); await loadRegistry(); }
+    else { registry.push({ id: crypto.randomUUID(), name, modelUrl: modelId, descriptors: [desc] }); localStorage.setItem("face3d_registry", JSON.stringify(registry)); }
     renderRegistryList();
     personNameInput.value = "";
     statusEl.textContent = `${name} を登録しました`;
   });
 
-  // --- Save ---
+  // --- 保存 ---
   saveBtn.addEventListener("click", async () => {
-    syncCanvasSize();
-    updateMaskMeshes();
-    renderer.render(scene, camera);
+    // フル解像度でレンダリング
+    const w = preview.naturalWidth, h = preview.naturalHeight;
+    const saveRenderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    saveRenderer.setClearColor(0x000000, 0);
+    saveRenderer.setSize(w, h);
 
-    // 合成用キャンバス
+    const saveCam = new THREE.OrthographicCamera(0, w, 0, h, 0.1, 1000);
+    saveCam.position.z = 500;
+
+    // メッシュ位置をフル解像度座標に変換
+    for (const entry of maskEntries) {
+      const px = entry.basePosition.x + entry.offsetX * (preview.naturalWidth / preview.getBoundingClientRect().width);
+      const py = entry.basePosition.y + entry.offsetY * (preview.naturalHeight / preview.getBoundingClientRect().height);
+      const s = entry.baseScale * entry.scaleMultiplier;
+      entry.mesh.position.set(px, py, 0);
+      entry.mesh.scale.set(s, s, s);
+      entry.mesh.rotation.set(
+        entry.baseAngles.pitch,
+        -(entry.baseAngles.yaw + entry.rotationOffsetY),
+        -entry.baseAngles.roll
+      );
+    }
+    saveRenderer.render(scene, saveCam);
+
     const compositeCanvas = document.createElement("canvas");
-    compositeCanvas.width = preview.naturalWidth;
-    compositeCanvas.height = preview.naturalHeight;
-    const ctx = compositeCanvas.getContext("2d")!;
+    compositeCanvas.width = w;
+    compositeCanvas.height = h;
+    const cctx = compositeCanvas.getContext("2d")!;
+    cctx.drawImage(preview, 0, 0);
+    cctx.drawImage(saveRenderer.domElement, 0, 0);
 
-    ctx.drawImage(preview, 0, 0);
-
-    // Three.jsキャンバスをリサイズして合成
-    const tmpCanvas = document.createElement("canvas");
-    tmpCanvas.width = preview.naturalWidth;
-    tmpCanvas.height = preview.naturalHeight;
-    const tmpCtx = tmpCanvas.getContext("2d")!;
-    tmpCtx.drawImage(threeCanvas, 0, 0, preview.naturalWidth, preview.naturalHeight);
-    ctx.drawImage(tmpCanvas, 0, 0);
+    saveRenderer.dispose();
 
     const dataUrl = compositeCanvas.toDataURL("image/png");
     const baseName = currentFileName.replace(/\.[^.]+$/, "");
     const saveName = `${baseName}.png`;
 
     if (useElectron) {
-      const savedPath = await window.electronAPI!.saveFile(saveName, dataUrl);
-      if (savedPath) statusEl.textContent = `保存しました: ${savedPath}`;
+      const path = await window.electronAPI!.saveFile(saveName, dataUrl);
+      if (path) statusEl.textContent = `保存しました: ${path}`;
     } else {
       const link = document.createElement("a");
       link.download = saveName;

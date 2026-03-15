@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getAllModels: () => ipcRenderer.invoke("model:getAll"),
   getModel: (id: string) => ipcRenderer.invoke("model:get", id),
   importModel: () => ipcRenderer.invoke("model:import"),
+  importImage: () => ipcRenderer.invoke("model:importImage"),
   deleteModel: (id: string) => ipcRenderer.invoke("model:delete", id),
   readModelFile: (storedPath: string) => ipcRenderer.invoke("model:readFile", storedPath),
 

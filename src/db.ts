@@ -27,6 +27,7 @@ export function createDb(dbPath: string): Database.Database {
       name TEXT NOT NULL,
       original_name TEXT NOT NULL,
       stored_path TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'model3d',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
@@ -105,11 +106,14 @@ export function addDescriptorToPerson(
 
 // --- 3Dモデル管理 ---
 
+export type ModelType = "model3d" | "image";
+
 export interface StoredModel {
   id: string;
   name: string;
   originalName: string;
   storedPath: string;
+  type: ModelType;
   createdAt: string;
 }
 
@@ -117,14 +121,15 @@ export function addModel(
   db: Database.Database,
   name: string,
   originalName: string,
-  storedPath: string
+  storedPath: string,
+  type: ModelType = "model3d"
 ): StoredModel {
   const id = randomUUID();
   db.prepare(
-    "INSERT INTO models (id, name, original_name, stored_path) VALUES (?, ?, ?, ?)"
-  ).run(id, name, originalName, storedPath);
+    "INSERT INTO models (id, name, original_name, stored_path, type) VALUES (?, ?, ?, ?, ?)"
+  ).run(id, name, originalName, storedPath, type);
 
-  return { id, name, originalName, storedPath, createdAt: new Date().toISOString() };
+  return { id, name, originalName, storedPath, type, createdAt: new Date().toISOString() };
 }
 
 export function getAllModels(db: Database.Database): StoredModel[] {
@@ -133,6 +138,7 @@ export function getAllModels(db: Database.Database): StoredModel[] {
     name: string;
     original_name: string;
     stored_path: string;
+    type: ModelType;
     created_at: string;
   }[];
 
@@ -141,6 +147,7 @@ export function getAllModels(db: Database.Database): StoredModel[] {
     name: r.name,
     originalName: r.original_name,
     storedPath: r.stored_path,
+    type: r.type,
     createdAt: r.created_at,
   }));
 }
@@ -151,6 +158,7 @@ export function getModel(db: Database.Database, id: string): StoredModel | null 
     name: string;
     original_name: string;
     stored_path: string;
+    type: ModelType;
     created_at: string;
   } | undefined;
 
@@ -160,6 +168,7 @@ export function getModel(db: Database.Database, id: string): StoredModel | null 
     name: row.name,
     originalName: row.original_name,
     storedPath: row.stored_path,
+    type: row.type,
     createdAt: row.created_at,
   };
 }
