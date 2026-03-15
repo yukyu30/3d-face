@@ -33,7 +33,9 @@ interface MaskEntry {
   offsetX: number;
   offsetY: number;
   scaleMultiplier: number;
-  rotationOffsetY: number;
+  rotOffsetX: number; // pitch (上下)
+  rotOffsetY: number; // yaw (左右)
+  rotOffsetZ: number; // roll (傾き)
   basePosition: { x: number; y: number };
   baseScale: number;
   baseAngles: { pitch: number; yaw: number; roll: number };
@@ -156,9 +158,9 @@ async function main() {
       entry.mesh.position.set(px, py, 0);
       entry.mesh.scale.set(s, s, s);
       entry.mesh.rotation.set(
-        entry.baseAngles.pitch,
-        -(entry.baseAngles.yaw + entry.rotationOffsetY),
-        -entry.baseAngles.roll
+        entry.baseAngles.pitch + entry.rotOffsetX,
+        -(entry.baseAngles.yaw) + entry.rotOffsetY,
+        -(entry.baseAngles.roll) + entry.rotOffsetZ
       );
     }
 
@@ -187,11 +189,12 @@ async function main() {
   render();
 
   // --- ドラッグ操作 ---
+  type DragMode = "none" | "move" | "rotateXY" | "rotateZ";
   let isDragging = false;
+  let dragMode: DragMode = "none";
   let dragStartX = 0, dragStartY = 0;
   let dragStartOffsetX = 0, dragStartOffsetY = 0;
-  let dragStartRotation = 0;
-  let isRotating = false;
+  let dragStartRotX = 0, dragStartRotY = 0, dragStartRotZ = 0;
 
   function findMaskAtPoint(px: number, py: number): MaskEntry | null {
     const img = preview;
@@ -225,22 +228,33 @@ async function main() {
     if (hit) {
       selectedMaskId = hit.id;
       isDragging = true;
-      isRotating = e.shiftKey;
       dragStartX = px;
       dragStartY = py;
       dragStartOffsetX = hit.offsetX;
       dragStartOffsetY = hit.offsetY;
-      dragStartRotation = hit.rotationOffsetY;
-      canvas.style.cursor = isRotating ? "crosshair" : "grabbing";
+      dragStartRotX = hit.rotOffsetX;
+      dragStartRotY = hit.rotOffsetY;
+      dragStartRotZ = hit.rotOffsetZ;
+
+      if (e.altKey || e.metaKey) {
+        dragMode = "rotateZ";
+        canvas.style.cursor = "alias";
+      } else if (e.shiftKey) {
+        dragMode = "rotateXY";
+        canvas.style.cursor = "crosshair";
+      } else {
+        dragMode = "move";
+        canvas.style.cursor = "grabbing";
+      }
     } else {
       selectedMaskId = null;
+      dragMode = "none";
     }
     renderMaskList();
   });
 
   canvas.addEventListener("pointermove", (e) => {
     if (!isDragging || selectedMaskId === null) {
-      // ホバーカーソル
       const rect = canvas.getBoundingClientRect();
       const hit = findMaskAtPoint(e.clientX - rect.left, e.clientY - rect.top);
       canvas.style.cursor = hit ? "grab" : "default";
@@ -250,27 +264,37 @@ async function main() {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    const dx = px - dragStartX;
+    const dy = py - dragStartY;
     const entry = maskEntries.find((m) => m.id === selectedMaskId);
     if (!entry) return;
 
-    if (isRotating) {
-      const dx = px - dragStartX;
-      entry.rotationOffsetY = dragStartRotation + dx * 0.01;
-    } else {
-      entry.offsetX = dragStartOffsetX + (px - dragStartX);
-      entry.offsetY = dragStartOffsetY + (py - dragStartY);
+    switch (dragMode) {
+      case "move":
+        entry.offsetX = dragStartOffsetX + dx;
+        entry.offsetY = dragStartOffsetY + dy;
+        break;
+      case "rotateXY":
+        // 横方向 → Y軸回転、縦方向 → X軸回転
+        entry.rotOffsetY = dragStartRotY + dx * 0.01;
+        entry.rotOffsetX = dragStartRotX + dy * 0.01;
+        break;
+      case "rotateZ":
+        // 横方向 → Z軸回転
+        entry.rotOffsetZ = dragStartRotZ + dx * 0.01;
+        break;
     }
   });
 
   canvas.addEventListener("pointerup", () => {
     isDragging = false;
-    isRotating = false;
+    dragMode = "none";
     canvas.style.cursor = "default";
   });
 
   canvas.addEventListener("pointerleave", () => {
     isDragging = false;
-    isRotating = false;
+    dragMode = "none";
   });
 
   // スクロールで拡縮
@@ -359,7 +383,7 @@ async function main() {
             const entry: MaskEntry = {
               id: nextMaskId++,
               label: person ? person.name : `顔 ${i + 1}`,
-              mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotationOffsetY: 0,
+              mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotOffsetX: 0, rotOffsetY: 0, rotOffsetZ: 0,
               basePosition: { x: tf.position.x, y: tf.position.y },
               baseScale: tf.scale,
               baseAngles: { pitch: angles.pitch, yaw: angles.yaw, roll: angles.roll },
@@ -385,7 +409,7 @@ async function main() {
     const entry: MaskEntry = {
       id: nextMaskId++,
       label: `マスク ${nextMaskId - 1}`,
-      mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotationOffsetY: 0,
+      mesh, offsetX: 0, offsetY: 0, scaleMultiplier: 1.0, rotOffsetX: 0, rotOffsetY: 0, rotOffsetZ: 0,
       basePosition: { x: preview.naturalWidth / 2, y: preview.naturalHeight / 2 },
       baseScale: Math.min(preview.naturalWidth, preview.naturalHeight) * 0.25,
       baseAngles: { pitch: 0, yaw: 0, roll: 0 },
@@ -419,14 +443,23 @@ async function main() {
     return new Promise((resolve) => {
       gltfLoader.parse(buffer, "", (gltf) => {
         const obj = gltf.scene;
+        // バウンディングボックスで正規化＆中央寄せ
         const box = new THREE.Box3().setFromObject(obj);
         const size = box.getSize(new THREE.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z);
-        if (maxDim > 0) obj.scale.multiplyScalar(1 / maxDim);
         const center = box.getCenter(new THREE.Vector3());
-        obj.position.sub(center.multiplyScalar(1 / maxDim));
-        modelCache.set(modelId, obj.clone());
-        resolve(obj);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        // ラッパーGroupで中心をオフセット
+        const wrapper = new THREE.Group();
+        if (maxDim > 0) obj.scale.multiplyScalar(1 / maxDim);
+        // センタリング: スケール後の中心を原点へ
+        obj.position.set(
+          -center.x / maxDim,
+          -center.y / maxDim,
+          -center.z / maxDim
+        );
+        wrapper.add(obj);
+        modelCache.set(modelId, wrapper.clone());
+        resolve(wrapper);
       }, () => resolve(createDefaultBox()));
     });
   }
@@ -615,9 +648,9 @@ async function main() {
       entry.mesh.position.set(px, py, 0);
       entry.mesh.scale.set(s, s, s);
       entry.mesh.rotation.set(
-        entry.baseAngles.pitch,
-        -(entry.baseAngles.yaw + entry.rotationOffsetY),
-        -entry.baseAngles.roll
+        entry.baseAngles.pitch + entry.rotOffsetX,
+        -(entry.baseAngles.yaw) + entry.rotOffsetY,
+        -(entry.baseAngles.roll) + entry.rotOffsetZ
       );
     }
     saveRenderer.render(scene, saveCam);
