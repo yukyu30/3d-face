@@ -169,18 +169,11 @@ async function main() {
     // Three.js結果を2Dキャンバスの画像位置に描画
     ctx.drawImage(renderer.domElement, ox, oy);
 
-    // 選択マスクのハイライト
+    // 選択マスクのハンドル描画
     if (selectedMaskId !== null) {
       const entry = maskEntries.find((m) => m.id === selectedMaskId);
       if (entry) {
-        const px = entry.basePosition.x * sx + entry.offsetX + ox;
-        const py = entry.basePosition.y * sy + entry.offsetY + oy;
-        const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
-        ctx.strokeStyle = "#e94560";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 5]);
-        ctx.strokeRect(px - s * 0.6, py - s * 0.75, s * 1.2, s * 1.5);
-        ctx.setLineDash([]);
+        drawHandles(ctx, entry, sx, sy, ox, oy);
       }
     }
 
@@ -188,64 +181,200 @@ async function main() {
   }
   render();
 
+  // --- ハンドル描画 ---
+  const HANDLE_SIZE = 8;
+  const HANDLE_RADIUS = 7;
+  const COLORS = { move: "#ffffff", scale: "#ffcc00", rotX: "#ff4444", rotY: "#44ff44", rotZ: "#4488ff", outline: "#e94560" };
+
+  function getMaskRect(entry: MaskEntry, sx: number, sy: number, ox: number, oy: number) {
+    const cx = entry.basePosition.x * sx + entry.offsetX + ox;
+    const cy = entry.basePosition.y * sy + entry.offsetY + oy;
+    const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
+    const hw = s * 0.65, hh = s * 0.8;
+    return { cx, cy, hw, hh, s };
+  }
+
+  type HandleType = "move" | "scale-tl" | "scale-tr" | "scale-bl" | "scale-br" | "rotX-top" | "rotX-bot" | "rotY-left" | "rotY-right" | "rotZ";
+
+  interface HandleDef { type: HandleType; x: number; y: number; }
+
+  function getHandles(entry: MaskEntry, sx: number, sy: number, ox: number, oy: number): HandleDef[] {
+    const { cx, cy, hw, hh } = getMaskRect(entry, sx, sy, ox, oy);
+    return [
+      // 四隅: スケール
+      { type: "scale-tl", x: cx - hw, y: cy - hh },
+      { type: "scale-tr", x: cx + hw, y: cy - hh },
+      { type: "scale-bl", x: cx - hw, y: cy + hh },
+      { type: "scale-br", x: cx + hw, y: cy + hh },
+      // 上下: X回転 (赤)
+      { type: "rotX-top", x: cx, y: cy - hh - 20 },
+      { type: "rotX-bot", x: cx, y: cy + hh + 20 },
+      // 左右: Y回転 (緑)
+      { type: "rotY-left", x: cx - hw - 20, y: cy },
+      { type: "rotY-right", x: cx + hw + 20, y: cy },
+      // 右上外側: Z回転 (青)
+      { type: "rotZ", x: cx + hw + 14, y: cy - hh - 14 },
+    ];
+  }
+
+  function drawHandles(c: CanvasRenderingContext2D, entry: MaskEntry, sx: number, sy: number, ox: number, oy: number) {
+    const { cx, cy, hw, hh } = getMaskRect(entry, sx, sy, ox, oy);
+
+    // バウンディングボックス
+    c.strokeStyle = COLORS.outline;
+    c.lineWidth = 1.5;
+    c.setLineDash([4, 4]);
+    c.strokeRect(cx - hw, cy - hh, hw * 2, hh * 2);
+    c.setLineDash([]);
+
+    const handles = getHandles(entry, sx, sy, ox, oy);
+    for (const h of handles) {
+      if (h.type.startsWith("scale")) {
+        // 四角ハンドル (黄)
+        c.fillStyle = COLORS.scale;
+        c.strokeStyle = "#000";
+        c.lineWidth = 1;
+        c.fillRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+        c.strokeRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+      } else if (h.type.startsWith("rotX")) {
+        // X回転 (赤丸)
+        c.beginPath();
+        c.arc(h.x, h.y, HANDLE_RADIUS, 0, Math.PI * 2);
+        c.fillStyle = COLORS.rotX;
+        c.fill();
+        c.strokeStyle = "#000";
+        c.lineWidth = 1;
+        c.stroke();
+        c.fillStyle = "#fff";
+        c.font = "bold 8px sans-serif";
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillText("X", h.x, h.y);
+      } else if (h.type.startsWith("rotY")) {
+        // Y回転 (緑丸)
+        c.beginPath();
+        c.arc(h.x, h.y, HANDLE_RADIUS, 0, Math.PI * 2);
+        c.fillStyle = COLORS.rotY;
+        c.fill();
+        c.strokeStyle = "#000";
+        c.lineWidth = 1;
+        c.stroke();
+        c.fillStyle = "#fff";
+        c.font = "bold 8px sans-serif";
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillText("Y", h.x, h.y);
+      } else if (h.type === "rotZ") {
+        // Z回転 (青丸)
+        c.beginPath();
+        c.arc(h.x, h.y, HANDLE_RADIUS, 0, Math.PI * 2);
+        c.fillStyle = COLORS.rotZ;
+        c.fill();
+        c.strokeStyle = "#000";
+        c.lineWidth = 1;
+        c.stroke();
+        c.fillStyle = "#fff";
+        c.font = "bold 8px sans-serif";
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillText("Z", h.x, h.y);
+      }
+    }
+
+    // 接続線 (ハンドル ← ボックス)
+    c.strokeStyle = COLORS.rotX;
+    c.lineWidth = 1;
+    c.beginPath(); c.moveTo(cx, cy - hh); c.lineTo(cx, cy - hh - 20); c.stroke();
+    c.beginPath(); c.moveTo(cx, cy + hh); c.lineTo(cx, cy + hh + 20); c.stroke();
+    c.strokeStyle = COLORS.rotY;
+    c.beginPath(); c.moveTo(cx - hw, cy); c.lineTo(cx - hw - 20, cy); c.stroke();
+    c.beginPath(); c.moveTo(cx + hw, cy); c.lineTo(cx + hw + 20, cy); c.stroke();
+    c.strokeStyle = COLORS.rotZ;
+    c.beginPath(); c.moveTo(cx + hw, cy - hh); c.lineTo(cx + hw + 14, cy - hh - 14); c.stroke();
+  }
+
   // --- ドラッグ操作 ---
-  type DragMode = "none" | "move" | "rotateXY" | "rotateZ";
+  type DragMode = "none" | "move" | "scale" | "rotX" | "rotY" | "rotZ";
   let isDragging = false;
   let dragMode: DragMode = "none";
   let dragStartX = 0, dragStartY = 0;
   let dragStartOffsetX = 0, dragStartOffsetY = 0;
+  let dragStartScale = 1;
   let dragStartRotX = 0, dragStartRotY = 0, dragStartRotZ = 0;
+
+  function hitTestHandles(px: number, py: number, entry: MaskEntry): DragMode {
+    const img = preview;
+    const rect = img.getBoundingClientRect();
+    const parent = img.parentElement!.getBoundingClientRect();
+    const ox = rect.left - parent.left, oy = rect.top - parent.top;
+    const sx = rect.width / img.naturalWidth, sy = rect.height / img.naturalHeight;
+
+    const handles = getHandles(entry, sx, sy, ox, oy);
+    for (const h of handles) {
+      const dist = Math.sqrt((px - h.x) ** 2 + (py - h.y) ** 2);
+      if (dist <= HANDLE_RADIUS + 4) {
+        if (h.type.startsWith("scale")) return "scale";
+        if (h.type.startsWith("rotX")) return "rotX";
+        if (h.type.startsWith("rotY")) return "rotY";
+        if (h.type === "rotZ") return "rotZ";
+      }
+    }
+    return "none";
+  }
 
   function findMaskAtPoint(px: number, py: number): MaskEntry | null {
     const img = preview;
     const rect = img.getBoundingClientRect();
     const parent = img.parentElement!.getBoundingClientRect();
-    const ox = rect.left - parent.left;
-    const oy = rect.top - parent.top;
-    const sx = rect.width / img.naturalWidth;
-    const sy = rect.height / img.naturalHeight;
+    const ox = rect.left - parent.left, oy = rect.top - parent.top;
+    const sx = rect.width / img.naturalWidth, sy = rect.height / img.naturalHeight;
 
-    // 逆順（最前面から）チェック
     for (let i = maskEntries.length - 1; i >= 0; i--) {
       const entry = maskEntries[i];
-      const mx = entry.basePosition.x * sx + entry.offsetX + ox;
-      const my = entry.basePosition.y * sy + entry.offsetY + oy;
-      const s = entry.baseScale * Math.min(sx, sy) * entry.scaleMultiplier;
-      const halfW = s * 0.6, halfH = s * 0.75;
-      if (px >= mx - halfW && px <= mx + halfW && py >= my - halfH && py <= my + halfH) {
-        return entry;
-      }
+      const { cx, cy, hw, hh } = getMaskRect(entry, sx, sy, ox, oy);
+      if (px >= cx - hw && px <= cx + hw && py >= cy - hh && py <= cy + hh) return entry;
     }
     return null;
   }
 
-  canvas.addEventListener("pointerdown", (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
+  const cursors: Record<DragMode, string> = {
+    none: "default", move: "grabbing", scale: "nwse-resize",
+    rotX: "ns-resize", rotY: "ew-resize", rotZ: "alias",
+  };
 
+  canvas.addEventListener("pointerdown", (e) => {
+    const r = canvas.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+
+    // 1) 選択中のマスクのハンドルを先にチェック
+    if (selectedMaskId !== null) {
+      const entry = maskEntries.find((m) => m.id === selectedMaskId);
+      if (entry) {
+        const handleMode = hitTestHandles(px, py, entry);
+        if (handleMode !== "none") {
+          isDragging = true;
+          dragMode = handleMode;
+          dragStartX = px; dragStartY = py;
+          dragStartOffsetX = entry.offsetX; dragStartOffsetY = entry.offsetY;
+          dragStartScale = entry.scaleMultiplier;
+          dragStartRotX = entry.rotOffsetX; dragStartRotY = entry.rotOffsetY; dragStartRotZ = entry.rotOffsetZ;
+          canvas.style.cursor = cursors[dragMode];
+          return;
+        }
+      }
+    }
+
+    // 2) マスク本体のクリック判定
     const hit = findMaskAtPoint(px, py);
     if (hit) {
       selectedMaskId = hit.id;
       isDragging = true;
-      dragStartX = px;
-      dragStartY = py;
-      dragStartOffsetX = hit.offsetX;
-      dragStartOffsetY = hit.offsetY;
-      dragStartRotX = hit.rotOffsetX;
-      dragStartRotY = hit.rotOffsetY;
-      dragStartRotZ = hit.rotOffsetZ;
-
-      if (e.altKey || e.metaKey) {
-        dragMode = "rotateZ";
-        canvas.style.cursor = "alias";
-      } else if (e.shiftKey) {
-        dragMode = "rotateXY";
-        canvas.style.cursor = "crosshair";
-      } else {
-        dragMode = "move";
-        canvas.style.cursor = "grabbing";
-      }
+      dragMode = "move";
+      dragStartX = px; dragStartY = py;
+      dragStartOffsetX = hit.offsetX; dragStartOffsetY = hit.offsetY;
+      dragStartScale = hit.scaleMultiplier;
+      dragStartRotX = hit.rotOffsetX; dragStartRotY = hit.rotOffsetY; dragStartRotZ = hit.rotOffsetZ;
+      canvas.style.cursor = "grabbing";
     } else {
       selectedMaskId = null;
       dragMode = "none";
@@ -254,18 +383,24 @@ async function main() {
   });
 
   canvas.addEventListener("pointermove", (e) => {
+    const r = canvas.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    const dx = px - dragStartX, dy = py - dragStartY;
+
     if (!isDragging || selectedMaskId === null) {
-      const rect = canvas.getBoundingClientRect();
-      const hit = findMaskAtPoint(e.clientX - rect.left, e.clientY - rect.top);
+      // ホバー: ハンドル上ならカーソル変更
+      if (selectedMaskId !== null) {
+        const entry = maskEntries.find((m) => m.id === selectedMaskId);
+        if (entry) {
+          const hm = hitTestHandles(px, py, entry);
+          if (hm !== "none") { canvas.style.cursor = cursors[hm]; return; }
+        }
+      }
+      const hit = findMaskAtPoint(px, py);
       canvas.style.cursor = hit ? "grab" : "default";
       return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
-    const dx = px - dragStartX;
-    const dy = py - dragStartY;
     const entry = maskEntries.find((m) => m.id === selectedMaskId);
     if (!entry) return;
 
@@ -274,13 +409,19 @@ async function main() {
         entry.offsetX = dragStartOffsetX + dx;
         entry.offsetY = dragStartOffsetY + dy;
         break;
-      case "rotateXY":
-        // 横方向 → Y軸回転、縦方向 → X軸回転
-        entry.rotOffsetY = dragStartRotY + dx * 0.01;
+      case "scale": {
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const sign = (dx + dy) > 0 ? 1 : -1;
+        entry.scaleMultiplier = Math.max(0.1, Math.min(5, dragStartScale + sign * dist * 0.005));
+        break;
+      }
+      case "rotX":
         entry.rotOffsetX = dragStartRotX + dy * 0.01;
         break;
-      case "rotateZ":
-        // 横方向 → Z軸回転
+      case "rotY":
+        entry.rotOffsetY = dragStartRotY + dx * 0.01;
+        break;
+      case "rotZ":
         entry.rotOffsetZ = dragStartRotZ + dx * 0.01;
         break;
     }
@@ -297,7 +438,7 @@ async function main() {
     dragMode = "none";
   });
 
-  // スクロールで拡縮
+  // スクロールで拡縮 (選択なしでもホバー中のマスクに適用)
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     if (selectedMaskId === null) return;
